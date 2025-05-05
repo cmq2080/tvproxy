@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,26 +19,60 @@ const (
 )
 
 var (
+	debug      bool   = false
 	currentDir string = "."
 	baseURL    string
 
-	listen string
+	listen  string
+	timeout int = 10
 )
 
 func main() {
 	initialize()
-	fmt.Println("Proxy Started!!!\nListen:" + listen)
+	fmt.Println("Proxy Started!!!\nListen: http://" + listen + "/\nTimeout: " + strconv.Itoa(timeout) + " Second(s)\nBaseURL: " + baseURL)
+
+	if debug {
+		fmt.Println("[channels]")
+		for _, channel := range channels {
+			fmt.Println("名称: " + channel.Name)
+			fmt.Println("描述: " + channel.Desc)
+			fmt.Println("链接: " + channel.Url)
+			fmt.Println("前缀: " + channel.PlayPrefix + "\n")
+		}
+	}
 
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
 
-	r.GET("play.ts", tsProxyHandler)
+	r.Handle(http.MethodGet, "/*action", func(c *gin.Context) {
+		action := c.Param("action")
+		action = strings.TrimLeft(action, "/")
 
-	r.GET("/fhzw.m3u8", fhzwHandler)
-	r.GET("/fhzx.m3u8", fhzxHandler)
-	r.GET("/wxxwt.m3u8", wxxwtHandler)
-	r.GET("/msxw.m3u8", msxwHandler)
-	r.GET("/tsxw.m3u8", tsxwHandler)
+		if action == "play.ts" {
+			tsProxyHandler(c)
+		}
+		if action == "play.m3u8" {
+			m3u8ProxyHandler(c)
+		}
+
+		length := len(action)
+		if strings.HasSuffix(action, ".m3u8") {
+			channelName := action[:length-5]
+			if debug {
+				fmt.Println(channelName)
+			}
+
+			channel, ok := FindInChannels(channelName)
+			if !ok {
+				c.AbortWithStatus(500)
+			}
+			url := channel.Url
+			c = SetQuery(c, "url", url)
+
+			m3u8ProxyHandler(c)
+		}
+
+	})
 
 	r.Run(listen)
 }
@@ -55,73 +91,79 @@ func initialize() {
 
 	json.Unmarshal(buff, &config)
 
-	buff2, ok := config["listen"].(string)
+	buff_debug, ok := config["debug"].(bool)
+	if !ok {
+		debug = false
+	} else {
+		debug = buff_debug
+	}
+
+	buff_listen, ok := config["listen"].(string)
 	if !ok {
 		panic("Property Error: " + "listen")
 	}
-	listen = buff2
-	if strings.Index(listen, ":") == 0 {
-		listen = "127.0.0.1" + listen
+	if !strings.Contains(buff_listen, ":") {
+		buff_listen += ":80"
 	}
-	baseURL = "http://" + listen + "/"
+	if strings.HasSuffix(buff_listen, ":") {
+		buff_listen += "80"
+	}
 
-	buff3, ok := config["channels"].([]interface{})
+	buff2_array := strings.Split(buff_listen, ":")
+	if len(buff2_array) != 2 {
+		panic("Property Error: " + "listen" + "-Error Format")
+	}
+	listen = buff_listen
+
+	serverUrl := buff2_array[0]
+	serverPort := buff2_array[1]
+
+	if serverUrl == "" {
+		serverUrl = "0.0.0.0"
+	}
+	if serverPort == "" {
+		serverPort = "80"
+	}
+
+	baseURL = "http://" + serverUrl + ":" + serverPort + "/"
+
+	buff_timeout, ok := config["timeout"].(float64)
+	if !ok {
+		panic("Property Error: " + "timeout")
+	}
+	timeout = int(buff_timeout)
+
+	buff_channels, ok := config["channels"].([]interface{})
 	if !ok {
 		panic("Property Error: " + "channels")
 	}
 
-	for _, v := range buff3 {
-		buff3_1 := v.(map[string]interface{})
+	for _, v := range buff_channels {
+		buff_channel := v.(map[string]interface{})
 		channel := Channel{
-			Name:       buff3_1["name"].(string),
-			Url:        buff3_1["url"].(string),
-			PlayPrefix: buff3_1["play_prefix"].(string),
+			Name: buff_channel["name"].(string),
+			Desc: buff_channel["desc"].(string),
+			Url:  buff_channel["url"].(string),
+		}
+		channel.PlayPrefix, ok = buff_channel["play_prefix"].(string)
+		if !ok || channel.PlayPrefix == "" {
+			channel.PlayPrefix = GetPlayPrefix(channel.Url)
 		}
 
 		channels = append(channels, channel)
 	}
 }
 
-type Response struct {
-	ctx *gin.Context
-}
-
-func newResponse(c *gin.Context) *Response {
-	return &Response{ctx: c}
-}
-
-func (resp *Response) Success(msg string, data interface{}) {
-	resp.ctx.JSON(CODE_SUCCESS, map[string]interface{}{
-		"stat": 0,
-		"msg":  msg,
-		"data": data,
-	})
-}
-
-func (resp *Response) SuccessWithoutData(msg string) {
-	resp.ctx.JSON(CODE_SUCCESS, map[string]interface{}{
-		"stat": 0,
-		"msg":  msg,
-	})
-}
-
-func (resp *Response) Error(msg string) {
-	resp.ctx.JSON(CODE_SUCCESS, map[string]interface{}{
-		"stat": 1,
-		"msg":  msg,
-	})
-}
-
-func (resp *Response) ErrorWithData(msg string, data interface{}) {
-	resp.ctx.JSON(CODE_SUCCESS, map[string]interface{}{
-		"stat": 1,
-		"msg":  msg,
-		"data": data,
-	})
-}
-
 func newHTTPClient() *http.Client {
 	return &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: time.Duration(timeout) * time.Second,
 	}
+}
+
+func SetQuery(c *gin.Context, key, value string) *gin.Context {
+	params, _ := url.ParseQuery(c.Request.URL.RawQuery)
+	params.Set(key, value)
+	c.Request.URL.RawQuery = params.Encode()
+
+	return c
 }

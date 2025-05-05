@@ -1,2 +1,2 @@
-go build -o tvproxy.exe
-./tvproxy.exe
+GOOS=linux GOARCH=amd64 go build -o ./deploy/tvproxy
+./deploy/tvproxy
